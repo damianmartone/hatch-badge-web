@@ -25,8 +25,15 @@ backends.
   what gets converted to ZPL / NIIMBOT rows. Never render the badge twice.
 - Geist must be loaded before any canvas text measurement — `await ensureGeist()`.
   Skipping it silently measures a fallback font and shifts the whole layout.
-- Settings are client-side (`localStorage`). The server only ever receives the
-  function URL + PIN per request, and validates the URL is an https Supabase host.
+- Settings are client-side (`localStorage`) and **save as you type** — there is
+  no Save button, because staff enter the PIN and go straight back to the kiosk.
+  Storage is per origin, so the server redirects `127.0.0.1` page loads to
+  `localhost`; otherwise the two addresses keep separate PINs.
+  The server only ever receives the function URL + PIN per request, and
+  validates the URL is an https Supabase host.
+- **Preview size = print size.** Use `labelFor(settings)` for anything that
+  renders a badge. It returns the Zebra label, or the NIIMBOT roll when that
+  backend is selected.
 
 ## Printing
 
@@ -37,6 +44,13 @@ Two backends, chosen in Settings:
   macOS has already done the connecting.
 - `niimbot` — the browser speaks the NIIMBOT binary protocol over Web Serial
   (USB) or Web Bluetooth (BLE). The server is not involved.
+
+**NIIMBOT badges are drawn at the roll's own size, never shrunk from 80×50.**
+Rolls are named width × length, width being *across the head*. `niimbotLayout()`
+in `niimbot/image.ts` renders landscape rolls upright, and tall rolls as a
+landscape badge turned 90°. The renderer itself is unchanged; it re-flows to
+any size. The roll's RFID tag gives barcode / labels left / stock type but
+**no dimensions**, so staff pick the size from presets in Settings.
 
 **NIIMBOT reply ids are not always request + 1.** `SET_LABEL_TYPE` answers
 0x33, `SET_DENSITY` 0x31, `PRINT_STATUS` 0xB3 — see `repliesFor()` in
@@ -78,8 +92,10 @@ Verified:
   (639×400 badge → 384×613 dot strip for a 384-dot head).
 
 Not verified:
-- **A full NIIMBOT print.** A B3S failed at the first command (reply-id bug,
-  now fixed and tested against a simulated printer); not yet re-tried.
+- **A correct NIIMBOT print.** After the reply-id fix the B3S did print, but
+  rotated and oversized (it was getting the 80×50 badge turned sideways). The
+  roll-size rework is tested as geometry + RFID parsing only, not yet on paper.
+  The loaded roll's size is still unknown.
 - Live check-in against the edge function (no PIN was entered during the build),
   so `lookup`/`search`/`checkin`/`update` have only been exercised as types.
 

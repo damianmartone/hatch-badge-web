@@ -16,6 +16,20 @@ const DEFAULT_FUNCTION_URL =
   'https://dpacnmgiyezxtodtodac.supabase.co/functions/v1/badge-checkin'
 
 const app = express()
+
+/**
+ * Settings, camera and USB-printer permissions are all stored per origin, and
+ * localhost and 127.0.0.1 are different origins — open the kiosk via one, then
+ * the other, and the PIN looks lost. Send page loads to a single address.
+ * (/api is left alone: the Vite dev proxy reaches it as 127.0.0.1.)
+ */
+app.use((req, res, next) => {
+  if (req.hostname === '127.0.0.1' && req.method === 'GET' && !req.path.startsWith('/api/')) {
+    return res.redirect(302, `http://localhost:${PORT}${req.originalUrl}`)
+  }
+  next()
+})
+
 app.use(express.json({ limit: '12mb' }))
 
 /**

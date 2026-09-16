@@ -1,4 +1,4 @@
-import { isBlankRow, prepareForNiimbot, type Rotation } from './image'
+import { isBlankRow, prepareForNiimbot, type NiimbotLayout } from './image'
 import {
   decodePackets,
   describeCommand,
@@ -28,14 +28,19 @@ export interface NiimbotOptions {
   /** 1 = gap/with-gaps labels, 2 = black-mark, 3 = continuous. */
   labelType: number
   headWidth: number
-  rotation: Rotation
+  /** Clockwise turn, from niimbotLayout(). */
+  degrees: NiimbotLayout['degrees']
 }
 
-export const NIIMBOT_DEFAULTS: NiimbotOptions = {
-  density: 3,
-  labelType: 1,
-  headWidth: 384,
-  rotation: 'auto',
+/** What the RFID tag on the loaded roll says. It carries no dimensions. */
+export interface RollInfo {
+  barcode: string
+  serial: string
+  /** Labels on a full roll, and how many have been printed. */
+  total: number
+  used: number
+  /** 1 = gap labels, 2 = black mark, 3 = continuous — same values as SET_LABEL_TYPE. */
+  type: number
 }
 
 export interface DeviceInfo {
@@ -201,6 +206,46 @@ export class NiimbotClient {
     }
   }
 
+  /**
+   * Reads the loaded roll's RFID tag. Null when there's no tag (third-party
+   * rolls) or the model doesn't answer.
+   *
+   * Layout: uuid(8) · barcodeLen · barcode · serialLen · serial ·
+   *         total(u16) · used(u16) · type(u8)
+   */
+  async readRoll(): Promise<RollInfo | null> {
+    let packet: Packet
+    try {
+      packet = await this.transceive(REQ.GET_RFID, [0x01], repliesFor(REQ.GET_RFID), { tries: 1, timeout: 1500 })
+    } catch {
+      return null
+    }
+    const d = packet.data
+    if (d.length < 9 || d[0] === 0) return null
+
+    const text = new TextDecoder()
+    let i = 8
+    const readString = (): string | null => {
+      if (i >= d.length) return null
+      const len = d[i++]
+      if (i + len > d.length) return null
+      const value = text.decode(d.slice(i, i + len))
+      i += len
+      return value
+    }
+    const barcode = readString()
+    const serial = readString()
+    if (barcode === null || serial === null || i + 5 > d.length) return null
+
+    return {
+      barcode,
+      serial,
+      total: (d[i] << 8) | d[i + 1],
+      used: (d[i + 2] << 8) | d[i + 3],
+      type: d[i + 4],
+    }
+  }
+
   async heartbeat(): Promise<boolean> {
     try {
       await this.transceive(REQ.HEARTBEAT, [0x01], repliesFor(REQ.HEARTBEAT), { tries: 1, timeout: 1500 })
@@ -217,7 +262,7 @@ export class NiimbotClient {
    * report the page as finished before releasing it.
    */
   async printCanvas(source: HTMLCanvasElement, opts: NiimbotOptions, quantity = 1): Promise<void> {
-    const image = prepareForNiimbot(source, opts.headWidth, opts.rotation)
+    const image = prepareForNiimbot(source, opts.headWidth, opts.degrees)
 
     await this.transceive(REQ.SET_LABEL_TYPE, [opts.labelType])
     await this.transceive(REQ.SET_DENSITY, [opts.density])

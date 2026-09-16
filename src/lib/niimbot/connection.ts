@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { NiimbotClient, type DeviceInfo } from './client'
+import { NiimbotClient, type DeviceInfo, type RollInfo } from './client'
 import { serialSupported } from './transport'
 
 /**
@@ -11,11 +11,13 @@ import { serialSupported } from './transport'
 export interface ConnectionState {
   client: NiimbotClient | null
   info: DeviceInfo | null
+  /** The loaded roll's RFID tag, if it has one. */
+  roll: RollInfo | null
   connecting: boolean
   error: string | null
 }
 
-let state: ConnectionState = { client: null, info: null, connecting: false, error: null }
+let state: ConnectionState = { client: null, info: null, roll: null, connecting: false, error: null }
 const listeners = new Set<() => void>()
 
 function set(patch: Partial<ConnectionState>): void {
@@ -45,13 +47,15 @@ export async function connectNiimbot(kind: 'serial' | 'bluetooth'): Promise<void
   try {
     const client = await NiimbotClient.connect(kind)
     const info = await client.describe().catch(() => ({ name: client.name, kind: client.kind }))
-    set({ client, info, connecting: false, error: null })
+    const roll = await client.readRoll()
+    set({ client, info, roll, connecting: false, error: null })
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e)
     // A cancelled chooser is a normal outcome, not an error worth shouting about.
     set({
       client: null,
       info: null,
+      roll: null,
       connecting: false,
       error: /No port selected|User cancelled|chooser/i.test(msg) ? null : msg,
     })
@@ -60,8 +64,15 @@ export async function connectNiimbot(kind: 'serial' | 'bluetooth'): Promise<void
 
 export async function disconnectNiimbot(): Promise<void> {
   const client = state.client
-  set({ client: null, info: null, error: null })
+  set({ client: null, info: null, roll: null, error: null })
   await client?.close().catch(() => {})
+}
+
+/** Re-read the tag after staff swap the roll. */
+export async function refreshRoll(): Promise<void> {
+  const client = getNiimbot()
+  if (!client) return
+  set({ roll: await client.readRoll() })
 }
 
 /**
@@ -76,7 +87,8 @@ export async function tryReconnectSerial(): Promise<void> {
     set({ connecting: true })
     const client = await NiimbotClient.connect('serial', { reuseGranted: true })
     const info = await client.describe().catch(() => ({ name: client.name, kind: client.kind }))
-    set({ client, info, connecting: false, error: null })
+    const roll = await client.readRoll()
+    set({ client, info, roll, connecting: false, error: null })
   } catch {
     set({ connecting: false })
   }

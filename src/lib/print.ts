@@ -1,9 +1,10 @@
 import { renderBadge } from './badgeRenderer'
 import { ensureGeist } from './fonts'
 import { getNiimbot } from './niimbot/connection'
+import { niimbotLayout } from './niimbot/image'
 import { badgeZpl, testZpl } from './zpl'
 import type { Label } from './label'
-import type { AppSettings } from './settings'
+import { labelFor, type AppSettings } from './settings'
 import type { Badge } from './types'
 
 export interface PrinterInfo {
@@ -59,7 +60,10 @@ async function sendToNiimbot(canvas: HTMLCanvasElement, settings: AppSettings): 
       density: settings.niimbotDensity,
       labelType: settings.niimbotLabelType,
       headWidth: settings.niimbotHeadWidth,
-      rotation: settings.niimbotRotation,
+      degrees: niimbotLayout(
+        { widthMm: settings.niimbotRollWidthMm, lengthMm: settings.niimbotRollLengthMm },
+        settings.niimbotRotation,
+      ).degrees,
     })
     return { ok: true, jobId: '' }
   } catch (e) {
@@ -73,7 +77,8 @@ export async function printBadge(badge: Badge, settings: AppSettings, label: Lab
     return { ok: false, error: 'No printer selected.' }
   }
   await ensureGeist()
-  const canvas = renderBadge(document.createElement('canvas'), badge, label)
+  const size = settings.printerBackend === 'niimbot' ? labelFor(settings) : label
+  const canvas = renderBadge(document.createElement('canvas'), badge, size)
 
   if (settings.printerBackend === 'niimbot') return sendToNiimbot(canvas, settings)
 
@@ -109,7 +114,8 @@ export async function printTest(settings: AppSettings, label: Label): Promise<Pr
       ticket_type_label: '', role: '', status: '', checked_in: false,
       checked_in_at: null, role_tag: null, days: [1],
     }
-    const canvas = renderBadge(document.createElement('canvas'), sample, label)
+    const size = settings.printerBackend === 'niimbot' ? labelFor(settings) : label
+    const canvas = renderBadge(document.createElement('canvas'), sample, size)
     if (settings.printerBackend === 'niimbot') return sendToNiimbot(canvas, settings)
     return send({
       printer: settings.printerName,

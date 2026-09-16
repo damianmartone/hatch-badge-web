@@ -1,4 +1,5 @@
-import type { Rotation } from './niimbot/image'
+import type { Label } from './label'
+import { niimbotLayout, ROTATIONS, type Rotation } from './niimbot/image'
 
 /** All user-configurable settings, persisted in localStorage. */
 export interface AppSettings {
@@ -29,6 +30,9 @@ export interface AppSettings {
   niimbotLabelType: number
   niimbotHeadWidth: number
   niimbotRotation: Rotation
+  /** The loaded NIIMBOT roll: width across the head, length along the feed. */
+  niimbotRollWidthMm: number
+  niimbotRollLengthMm: number
 }
 
 export const DEFAULTS: AppSettings = {
@@ -51,6 +55,8 @@ export const DEFAULTS: AppSettings = {
   niimbotLabelType: 1,
   niimbotHeadWidth: 384,
   niimbotRotation: 'auto',
+  niimbotRollWidthMm: 50,
+  niimbotRollLengthMm: 30,
 }
 
 /** Sentinel session id meaning "no fixed session — accept per-session QR tokens". */
@@ -62,7 +68,10 @@ export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(KEY)
     if (!raw) return { ...DEFAULTS }
-    return { ...DEFAULTS, ...JSON.parse(raw) }
+    const merged: AppSettings = { ...DEFAULTS, ...JSON.parse(raw) }
+    // Earlier builds stored 'none' / other rotation values; fall back to auto.
+    if (!ROTATIONS.includes(merged.niimbotRotation)) merged.niimbotRotation = 'auto'
+    return merged
   } catch {
     return { ...DEFAULTS }
   }
@@ -74,6 +83,20 @@ export function saveSettings(s: AppSettings): void {
   } catch {
     /* private window / storage disabled — settings just won't persist */
   }
+}
+
+/**
+ * The size the badge is drawn at. Used for the on-screen preview *and* the
+ * print, so the preview always shows exactly what the selected printer gets.
+ */
+export function labelFor(s: AppSettings): Label {
+  if (s.printerBackend === 'niimbot') {
+    return niimbotLayout(
+      { widthMm: s.niimbotRollWidthMm, lengthMm: s.niimbotRollLengthMm },
+      s.niimbotRotation,
+    ).label
+  }
+  return { widthMm: s.labelWidthMm, heightMm: s.labelHeightMm, dpi: s.dpi }
 }
 
 export const isConfigured = (s: AppSettings) => Boolean(s.functionUrl.trim() && s.staffPin.trim())

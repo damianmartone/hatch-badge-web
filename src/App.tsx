@@ -10,6 +10,7 @@ import type { Label } from './lib/label'
 import {
   isConfigured,
   isSessionsMode,
+  labelFor,
   loadSettings,
   saveSettings,
   type AppSettings,
@@ -72,10 +73,9 @@ export default function App() {
     [],
   )
 
-  const label: Label = useMemo(
-    () => ({ widthMm: settings.labelWidthMm, heightMm: settings.labelHeightMm, dpi: settings.dpi }),
-    [settings.labelWidthMm, settings.labelHeightMm, settings.dpi],
-  )
+  // Follows the selected printer, so the review screen previews the real print.
+  const labelKey = JSON.stringify(labelFor(settings))
+  const label: Label = useMemo(() => JSON.parse(labelKey), [labelKey])
 
   const sessions = isSessionsMode(settings)
   const onKiosk = screen === 'KIOSK'

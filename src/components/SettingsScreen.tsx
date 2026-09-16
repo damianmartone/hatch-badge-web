@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { HEAD_WIDTHS } from '../lib/niimbot/client'
-import { connectNiimbot, disconnectNiimbot, tryReconnectSerial, useNiimbot } from '../lib/niimbot/connection'
-import type { Rotation } from '../lib/niimbot/image'
+import { connectNiimbot, disconnectNiimbot, refreshRoll, tryReconnectSerial, useNiimbot } from '../lib/niimbot/connection'
+import { niimbotLayout, type Rotation } from '../lib/niimbot/image'
 import { bluetoothSupported, serialSupported } from '../lib/niimbot/transport'
 import { listPrinters, printTest, type PrinterInfo } from '../lib/print'
 import { listCameras, type CameraOption } from '../lib/scanner'
-import { DEFAULTS, type AppSettings } from '../lib/settings'
+import { DEFAULTS, labelFor, type AppSettings } from '../lib/settings'
+import { EMPTY_BADGE, type Badge } from '../lib/types'
+import { BadgePreview } from './BadgePreview'
 import { BluetoothIcon, PrintIcon, UsbIcon, WifiIcon } from './Icons'
 
 interface Props {
@@ -66,23 +68,19 @@ export function SettingsScreen({ settings, onSave, toast }: Props) {
 
   const selected = printers.find((p) => p.name === draft.printerName)
 
-  const save = () => {
+  // Save as you go. Staff type the PIN and head straight back to the kiosk;
+  // an explicit Save button meant that silently threw the PIN away.
+  useEffect(() => {
     onSave(draft)
-    toast('Settings saved')
-  }
+  }, [draft, onSave])
 
-  const saveAndTest = async () => {
-    onSave(draft)
+  const testPrint = async () => {
     if (draft.printerBackend === 'system' && !draft.printerName) {
       toast('Pick a printer first.')
       return
     }
     setTesting(true)
-    const r = await printTest(draft, {
-      widthMm: draft.labelWidthMm,
-      heightMm: draft.labelHeightMm,
-      dpi: draft.dpi,
-    })
+    const r = await printTest(draft, labelFor(draft))
     setTesting(false)
     toast(r.ok ? 'Test label sent to the printer' : `Test print failed: ${r.error}`)
   }
@@ -254,32 +252,8 @@ export function SettingsScreen({ settings, onSave, toast }: Props) {
         )}
       </section>
 
-      {/* ---- Label size (shared by both backends) ---- */}
-      {draft.printerBackend === 'niimbot' && (
-        <section className="card stack">
-          <h3>Label size</h3>
-          <p className="small muted">
-            The badge is drawn at this size, then turned sideways to fit the NIIMBOT’s narrow head.
-          </p>
-          <div className="row">
-            <div className="field grow">
-              <label htmlFor="st-nw">Width mm</label>
-              <input id="st-nw" type="number" min={10} max={200} value={draft.labelWidthMm}
-                onChange={(e) => set('labelWidthMm', Number(e.target.value) || DEFAULTS.labelWidthMm)} />
-            </div>
-            <div className="field grow">
-              <label htmlFor="st-nh">Height mm</label>
-              <input id="st-nh" type="number" min={10} max={200} value={draft.labelHeightMm}
-                onChange={(e) => set('labelHeightMm', Number(e.target.value) || DEFAULTS.labelHeightMm)} />
-            </div>
-            <div className="field grow">
-              <label htmlFor="st-ndpi">DPI</label>
-              <input id="st-ndpi" type="number" min={100} max={600} value={draft.dpi}
-                onChange={(e) => set('dpi', Number(e.target.value) || DEFAULTS.dpi)} />
-            </div>
-          </div>
-        </section>
-      )}
+      {/* ---- NIIMBOT roll ---- */}
+      {draft.printerBackend === 'niimbot' && <NiimbotRollCard draft={draft} set={set} />}
 
       {/* ---- Camera ---- */}
       <section className="card stack">
@@ -300,38 +274,58 @@ export function SettingsScreen({ settings, onSave, toast }: Props) {
         </div>
       </section>
 
-      {/* ---- Save ---- */}
+      {/* ---- Test ---- */}
       <section className="card stack">
-        <h3>Save</h3>
-        <button type="button" className="btn primary block big" onClick={save}>
-          Save settings
-        </button>
-        <button type="button" className="btn block big" onClick={() => void saveAndTest()} disabled={testing}>
+        <h3>Test</h3>
+        <p className="small muted">Changes save automatically.</p>
+        <button type="button" className="btn primary block big" onClick={() => void testPrint()} disabled={testing}>
           <PrintIcon />
-          {testing ? 'Sending…' : 'Save & test print'}
+          {testing ? 'Sending…' : 'Test print'}
         </button>
       </section>
     </div>
   )
 }
 
-
 // ---------------- NIIMBOT ----------------
+
+type SetFn = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void
+
+const DOTS_PER_MM = 203 / 25.4
+
+/** Common NIIMBOT roll sizes, width (across the head) × length (along the feed). */
+const ROLL_PRESETS: [number, number][] = [
+  [50, 30], [40, 30], [30, 20], [50, 50], [60, 40], [70, 50], [75, 50], [50, 80], [40, 60],
+]
+
+const STOCK_NAMES: Record<number, string> = { 1: 'gap labels', 2: 'black-mark labels', 3: 'continuous roll' }
+
+const SAMPLE: Badge = {
+  ...EMPTY_BADGE,
+  ticket_id: 'sample',
+  first_name: 'Hanna',
+  last_name: 'Kang',
+  company: 'GetYourGuide',
+  linkedin_url: 'https://www.linkedin.com/in/hatch',
+  days: [1, 2],
+}
 
 /**
  * NIIMBOTs have no macOS driver, so they never show up in Printers & Scanners.
  * The browser talks to them directly, which needs one click to pick the device.
  */
-function NiimbotPanel({
-  draft,
-  set,
-}: {
-  draft: AppSettings
-  set: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void
-}) {
+function NiimbotPanel({ draft, set }: { draft: AppSettings; set: SetFn }) {
   const conn = useNiimbot()
   const transport = draft.niimbotTransport
   const supported = transport === 'serial' ? serialSupported() : bluetoothSupported()
+
+  // The roll's tag knows its stock type — use it rather than making staff guess.
+  const tagType = conn.roll?.type
+  useEffect(() => {
+    if (tagType && tagType >= 1 && tagType <= 3 && tagType !== draft.niimbotLabelType) {
+      set('niimbotLabelType', tagType)
+    }
+  }, [tagType, draft.niimbotLabelType, set])
 
   return (
     <>
@@ -399,9 +393,6 @@ function NiimbotPanel({
             </option>
           ))}
         </select>
-        <p className="small faint">
-          The badge is scaled to this head width — a 12 mm D11 can’t fit a conference badge legibly.
-        </p>
       </div>
 
       <div className="row">
@@ -428,19 +419,133 @@ function NiimbotPanel({
             <option value={3}>Continuous roll</option>
           </select>
         </div>
-        <div className="field grow">
-          <label htmlFor="st-nb-rot">Orientation</label>
-          <select
-            id="st-nb-rot"
-            value={draft.niimbotRotation}
-            onChange={(e) => set('niimbotRotation', e.target.value as Rotation)}
-          >
-            <option value="auto">Auto (turn if too wide)</option>
-            <option value="none">Upright</option>
-            <option value="90">Always sideways</option>
-          </select>
-        </div>
       </div>
     </>
+  )
+}
+
+/** Roll size, orientation and a preview of the badge at the roll's real size. */
+function NiimbotRollCard({ draft, set }: { draft: AppSettings; set: SetFn }) {
+  const conn = useNiimbot()
+  const roll = conn.roll
+  const headMm = Math.round(draft.niimbotHeadWidth / DOTS_PER_MM)
+  const width = draft.niimbotRollWidthMm
+  const length = draft.niimbotRollLengthMm
+  const layout = niimbotLayout({ widthMm: width, lengthMm: length }, draft.niimbotRotation)
+  const tooWide = width > headMm
+
+  const setRoll = (w: number, l: number) => {
+    set('niimbotRollWidthMm', w)
+    set('niimbotRollLengthMm', l)
+  }
+
+  return (
+    <section className="card stack">
+      <div className="row">
+        <h3 className="grow">NIIMBOT label roll</h3>
+        {conn.client && (
+          <button type="button" className="btn ghost" onClick={() => void refreshRoll()}>
+            Re-read roll
+          </button>
+        )}
+      </div>
+
+      {conn.client && roll && (
+        <div className="row wrap">
+          <span className="pill ok">Roll detected</span>
+          {roll.total > 0 && (
+            <span className="pill">
+              {Math.max(0, roll.total - roll.used)} of {roll.total} labels left
+            </span>
+          )}
+          {STOCK_NAMES[roll.type] && <span className="pill">{STOCK_NAMES[roll.type]}</span>}
+          {roll.barcode && <span className="pill mono">{roll.barcode}</span>}
+        </div>
+      )}
+      {conn.client && !roll && (
+        <p className="small muted">No RFID tag on this roll (or the printer didn’t report one).</p>
+      )}
+      <p className="small muted">
+        The roll’s tag doesn’t include its dimensions, so pick the size printed on the roll or its box —
+        width first, as NIIMBOT names them.
+      </p>
+
+      <div className="row wrap">
+        {ROLL_PRESETS.map(([w, l]) => {
+          const active = w === width && l === length
+          const fits = w <= headMm
+          return (
+            <button
+              key={`${w}x${l}`}
+              type="button"
+              className={`btn ${active ? 'primary' : ''}`}
+              style={{ padding: '8px 12px', fontSize: 14 }}
+              title={fits ? undefined : `Wider than this printer’s ${headMm} mm head`}
+              onClick={() => setRoll(w, l)}
+            >
+              {w}×{l}
+              {!fits && ' ⚠'}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="row">
+        <div className="field grow">
+          <label htmlFor="st-roll-w">Width mm (across the printer)</label>
+          <input
+            id="st-roll-w"
+            type="number"
+            min={10}
+            max={120}
+            value={width}
+            aria-invalid={tooWide ? 'true' : 'false'}
+            onChange={(e) => set('niimbotRollWidthMm', Number(e.target.value) || DEFAULTS.niimbotRollWidthMm)}
+          />
+        </div>
+        <div className="field grow">
+          <label htmlFor="st-roll-l">Length mm (feed direction)</label>
+          <input
+            id="st-roll-l"
+            type="number"
+            min={10}
+            max={200}
+            value={length}
+            onChange={(e) => set('niimbotRollLengthMm', Number(e.target.value) || DEFAULTS.niimbotRollLengthMm)}
+          />
+        </div>
+      </div>
+      {tooWide && (
+        <p className="small" style={{ color: 'var(--danger)' }}>
+          {width} mm is wider than this printer’s {headMm} mm head — the badge will be shrunk to fit.
+        </p>
+      )}
+
+      <div className="field">
+        <label htmlFor="st-nb-rot">Orientation</label>
+        <select
+          id="st-nb-rot"
+          value={draft.niimbotRotation}
+          onChange={(e) => set('niimbotRotation', e.target.value as Rotation)}
+        >
+          <option value="auto">Auto — upright on wide rolls, turned on tall ones</option>
+          <option value="0">Upright</option>
+          <option value="90">Turned 90° clockwise</option>
+          <option value="180">Upside down</option>
+          <option value="270">Turned 90° anticlockwise</option>
+        </select>
+        <p className="small faint">
+          If it comes out the wrong way round, step through these — it saves straight away.
+        </p>
+      </div>
+
+      <div className="stack tight">
+        <span className="small muted">
+          Badge drawn at {layout.label.widthMm} × {layout.label.heightMm} mm
+          {layout.degrees ? `, sent turned ${layout.degrees}°` : ', sent upright'}
+        </span>
+        <BadgePreview badge={SAMPLE} label={layout.label} />
+      </div>
+    </section>
   )
 }
