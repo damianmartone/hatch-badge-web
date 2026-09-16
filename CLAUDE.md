@@ -56,3 +56,26 @@ const { prepareForNiimbot } = await import('/src/lib/niimbot/image.ts')
 
 To check the print path without wasting a label, submit a held CUPS job and
 cancel it: `lp -d <queue> -o raw -H hold file.zpl` then `cancel <job-id>`.
+
+## Where things stand (16 Sep 2026)
+
+Built in one pass as a port of `../hatch-badge-android`; that repo is the
+reference for anything about the badge design or the edge function.
+
+Verified:
+- Badge renderer against four cases, including a name long enough to force
+  shrink-and-ellipsize. Output matches the Android layout.
+- Printer discovery on this laptop (`Zebra_Technologies_ZTC_ZD421_203dpi_ZPL`,
+  currently USB; the Canon and OKI are the WiFi ones).
+- That the Zebra queue accepts `lp -o raw` — confirmed with a held job that was
+  then cancelled, so no label was spent.
+- NIIMBOT packet framing/checksums and the sideways-rotation image path
+  (639×400 badge → 384×613 dot strip for a 384-dot head).
+
+Not verified:
+- **NIIMBOT against a real printer** — none was plugged in. See the warning in
+  the Printing section above.
+- Live check-in against the edge function (no PIN was entered during the build),
+  so `lookup`/`search`/`checkin`/`update` have only been exercised as types.
+
+No git remote yet — the repo is local-only.
