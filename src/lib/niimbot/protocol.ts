@@ -11,6 +11,7 @@
  */
 
 export const REQ = {
+  CONNECT: 0xc1,
   PRINT_START: 0x01,
   PAGE_START: 0x03,
   SET_PAGE_SIZE: 0x13,
@@ -99,5 +100,44 @@ export function decodePackets(buffer: Uint8Array): { packets: Packet[]; rest: Ui
 
 export const u16be = (n: number): number[] => [(n >> 8) & 0xff, n & 0xff]
 
-/** Most replies come back as the request id + 1. */
-export const replyFor = (requestType: number): number => (requestType + 1) & 0xff
+/**
+ * The reply id the printer sends back for each request. Most are request + 1,
+ * but a few settings/status commands answer at request + 0x10 — assuming +1
+ * everywhere makes those look like the printer never answered.
+ */
+const REPLY_OVERRIDES: Record<number, number[]> = {
+  [REQ.SET_DENSITY]: [0x31],
+  [REQ.SET_LABEL_TYPE]: [0x33],
+  [REQ.PRINT_STATUS]: [0xb3],
+  [REQ.HEARTBEAT]: [0xdd, 0xde, 0xdf, 0xd9],
+}
+
+export function repliesFor(requestType: number): number[] {
+  return REPLY_OVERRIDES[requestType] ?? [(requestType + 1) & 0xff]
+}
+
+/** Replies that mean "no" rather than "done". */
+export const RESP_ERROR = 0xdb
+export const RESP_NOT_SUPPORTED = 0x00
+
+const NAMES: Record<number, string> = {
+  [REQ.CONNECT]: 'connect',
+  [REQ.PRINT_START]: 'print start',
+  [REQ.PAGE_START]: 'page start',
+  [REQ.SET_PAGE_SIZE]: 'page size',
+  [REQ.SET_QUANTITY]: 'quantity',
+  [REQ.SET_DENSITY]: 'density',
+  [REQ.SET_LABEL_TYPE]: 'label type',
+  [REQ.GET_INFO]: 'get info',
+  [REQ.PRINT_STATUS]: 'print status',
+  [REQ.HEARTBEAT]: 'heartbeat',
+  [REQ.PAGE_END]: 'page end',
+  [REQ.PRINT_END]: 'print end',
+}
+
+/** "0x23 (label type)" — for error messages staff might read out to us. */
+export const describeCommand = (type: number): string =>
+  `0x${type.toString(16).padStart(2, '0')}${NAMES[type] ? ` (${NAMES[type]})` : ''}`
+
+export const hex = (bytes: Uint8Array | number[]): string =>
+  Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(' ')

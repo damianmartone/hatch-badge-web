@@ -1,9 +1,22 @@
 import { isBlankRow, prepareForNiimbot, type Rotation } from './image'
-import { decodePackets, encodePacket, INFO, REQ, replyFor, u16be, type Packet } from './protocol'
+import {
+  decodePackets,
+  describeCommand,
+  encodePacket,
+  hex,
+  INFO,
+  repliesFor,
+  REQ,
+  RESP_ERROR,
+  RESP_NOT_SUPPORTED,
+  u16be,
+  type Packet,
+} from './protocol'
 import { connectBluetooth, connectSerial, type SerialOptions, type Transport } from './transport'
 
 /** Print-head widths in dots (203 dpi) for the common models. */
 export const HEAD_WIDTHS: { label: string; dots: number }[] = [
+  { label: 'B3S — 72 mm (576 dots)', dots: 576 },
   { label: 'B1 / B21 / B203 — 50 mm (384 dots)', dots: 384 },
   { label: 'B18 — 30 mm (240 dots)', dots: 240 },
   { label: 'D11 / D110 / D101 — 12 mm (96 dots)', dots: 96 },
@@ -35,13 +48,24 @@ export interface DeviceInfo {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/** The printer said no — retrying the same command won't change its mind. */
+class PrinterRefused extends Error {}
+
 /**
  * A connected NIIMBOT printer. Talks the packet protocol over whichever
  * transport the user picked, and drives the full page-print handshake.
  */
 export class NiimbotClient {
   private buffer = new Uint8Array(0)
-  private waiters: { types: number[]; resolve: (p: Packet) => void; reject: (e: Error) => void }[] = []
+  private waiters: {
+    request: number
+    types: number[]
+    resolve: (p: Packet) => void
+    reject: (e: Error) => void
+  }[] = []
+  /** Last few packets received, so a timeout can say what *did* arrive. */
+  private recent: Packet[] = []
+  private bytesReceived = 0
 
   private constructor(private transport: Transport) {
     transport.onData((chunk) => this.ingest(chunk))
@@ -49,7 +73,13 @@ export class NiimbotClient {
 
   static async connect(kind: 'serial' | 'bluetooth', opts: SerialOptions = {}): Promise<NiimbotClient> {
     const transport = kind === 'serial' ? await connectSerial(opts) : await connectBluetooth()
-    return new NiimbotClient(transport)
+    const client = new NiimbotClient(transport)
+    // Newer firmware wants a connect handshake before anything else; older
+    // models don't know the command, so a non-answer here is fine.
+    await client
+      .transceive(REQ.CONNECT, [0x01], [0xc2], { tries: 1, timeout: 800 })
+      .catch(() => undefined)
+    return client
   }
 
   get connected(): boolean {
@@ -71,6 +101,7 @@ export class NiimbotClient {
   }
 
   private ingest(chunk: Uint8Array): void {
+    this.bytesReceived += chunk.length
     const merged = new Uint8Array(this.buffer.length + chunk.length)
     merged.set(this.buffer)
     merged.set(chunk, this.buffer.length)
@@ -78,9 +109,38 @@ export class NiimbotClient {
     this.buffer = rest
 
     for (const packet of packets) {
+      this.recent = [...this.recent.slice(-5), packet]
+
       const idx = this.waiters.findIndex((w) => w.types.includes(packet.type))
-      if (idx >= 0) this.waiters.splice(idx, 1)[0].resolve(packet)
+      if (idx >= 0) {
+        this.waiters.splice(idx, 1)[0].resolve(packet)
+        continue
+      }
+
+      // An error / unsupported reply answers whatever we're waiting on — fail
+      // it now with the real reason instead of letting it time out as silence.
+      if ((packet.type === RESP_ERROR || packet.type === RESP_NOT_SUPPORTED) && this.waiters.length > 0) {
+        const w = this.waiters.shift()!
+        const why = packet.type === RESP_ERROR ? 'reported an error on' : 'does not support'
+        w.reject(
+          new PrinterRefused(
+            `Printer ${why} command ${describeCommand(w.request)}` +
+              (packet.data.length ? ` [${hex(packet.data)}]` : ''),
+          ),
+        )
+      }
     }
+  }
+
+  /** What arrived from the printer, for error messages. */
+  private diagnostics(): string {
+    if (this.bytesReceived === 0) {
+      return 'Nothing at all came back from the printer — check it is switched on and that the right port was picked.'
+    }
+    if (this.recent.length === 0) {
+      return `${this.bytesReceived} bytes came back but none formed a valid NIIMBOT packet.`
+    }
+    return `Last replies: ${this.recent.map((p) => `0x${p.type.toString(16)}[${hex(p.data)}]`).join(', ')}`
   }
 
   /** Fire and forget — used for the thousands of image rows. */
@@ -92,19 +152,19 @@ export class NiimbotClient {
   private async transceive(
     type: number,
     data: number[] | Uint8Array,
-    expect: number[] = [replyFor(type)],
+    expect: number[] = repliesFor(type),
     { timeout = 2000, tries = 3 } = {},
   ): Promise<Packet> {
-    let lastError: Error = new Error(`No reply to command 0x${type.toString(16)}`)
+    let lastError: Error = new Error(`No reply to command ${describeCommand(type)}`)
     for (let attempt = 0; attempt < tries; attempt++) {
       const waiter = new Promise<Packet>((resolve, reject) => {
-        const entry = { types: expect, resolve, reject }
+        const entry = { request: type, types: expect, resolve, reject }
         this.waiters.push(entry)
         setTimeout(() => {
           const i = this.waiters.indexOf(entry)
           if (i >= 0) {
             this.waiters.splice(i, 1)
-            reject(new Error(`Printer did not answer command 0x${type.toString(16)}`))
+            reject(new Error(`Printer did not answer command ${describeCommand(type)}. ${this.diagnostics()}`))
           }
         }, timeout)
       })
@@ -113,6 +173,7 @@ export class NiimbotClient {
         return await waiter
       } catch (e) {
         lastError = e as Error
+        if (e instanceof PrinterRefused) break
       }
     }
     throw lastError
@@ -142,7 +203,7 @@ export class NiimbotClient {
 
   async heartbeat(): Promise<boolean> {
     try {
-      await this.transceive(REQ.HEARTBEAT, [0x01], [0xd3, 0xdd], { tries: 1, timeout: 1500 })
+      await this.transceive(REQ.HEARTBEAT, [0x01], repliesFor(REQ.HEARTBEAT), { tries: 1, timeout: 1500 })
       return true
     } catch {
       return false
@@ -158,16 +219,12 @@ export class NiimbotClient {
   async printCanvas(source: HTMLCanvasElement, opts: NiimbotOptions, quantity = 1): Promise<void> {
     const image = prepareForNiimbot(source, opts.headWidth, opts.rotation)
 
-    await this.transceive(REQ.SET_LABEL_TYPE, [opts.labelType], [replyFor(REQ.SET_LABEL_TYPE)])
-    await this.transceive(REQ.SET_DENSITY, [opts.density], [replyFor(REQ.SET_DENSITY)])
-    await this.transceive(REQ.PRINT_START, [0x01], [replyFor(REQ.PRINT_START)])
-    await this.transceive(REQ.PAGE_START, [0x01], [replyFor(REQ.PAGE_START)])
-    await this.transceive(
-      REQ.SET_PAGE_SIZE,
-      [...u16be(image.height), ...u16be(image.width)],
-      [replyFor(REQ.SET_PAGE_SIZE)],
-    )
-    await this.transceive(REQ.SET_QUANTITY, u16be(quantity), [replyFor(REQ.SET_QUANTITY)])
+    await this.transceive(REQ.SET_LABEL_TYPE, [opts.labelType])
+    await this.transceive(REQ.SET_DENSITY, [opts.density])
+    await this.transceive(REQ.PRINT_START, [0x01])
+    await this.transceive(REQ.PAGE_START, [0x01])
+    await this.transceive(REQ.SET_PAGE_SIZE, [...u16be(image.height), ...u16be(image.width)])
+    await this.transceive(REQ.SET_QUANTITY, u16be(quantity))
 
     for (let y = 0; y < image.rows.length; y++) {
       const row = image.rows[y]
@@ -183,9 +240,9 @@ export class NiimbotClient {
       }
     }
 
-    await this.transceive(REQ.PAGE_END, [0x01], [replyFor(REQ.PAGE_END)])
+    await this.transceive(REQ.PAGE_END, [0x01])
     await this.waitForPage(quantity)
-    await this.transceive(REQ.PRINT_END, [0x01], [replyFor(REQ.PRINT_END)])
+    await this.transceive(REQ.PRINT_END, [0x01])
   }
 
   /** Poll until the printer says the page came out (or we give up waiting). */
@@ -194,7 +251,10 @@ export class NiimbotClient {
     await sleep(300)
     while (Date.now() < deadline) {
       try {
-        const status = await this.transceive(REQ.PRINT_STATUS, [0x01], [0xb3], { tries: 1, timeout: 1500 })
+        const status = await this.transceive(REQ.PRINT_STATUS, [0x01], repliesFor(REQ.PRINT_STATUS), {
+          tries: 1,
+          timeout: 1500,
+        })
         const page = (status.data[0] << 8) | status.data[1]
         if (page >= quantity) return
       } catch {

@@ -38,11 +38,16 @@ Two backends, chosen in Settings:
 - `niimbot` — the browser speaks the NIIMBOT binary protocol over Web Serial
   (USB) or Web Bluetooth (BLE). The server is not involved.
 
-**The NIIMBOT path has never run against real hardware.** Framing/checksums are
-verified and the command ids match the published protocol, but if you get your
-hands on a printer, verify the print handshake in `niimbot/client.ts`
-(`printCanvas`) and the `SET_PAGE_SIZE` argument order first — those are the
-likeliest things to be wrong.
+**NIIMBOT reply ids are not always request + 1.** `SET_LABEL_TYPE` answers
+0x33, `SET_DENSITY` 0x31, `PRINT_STATUS` 0xB3 — see `repliesFor()` in
+`niimbot/protocol.ts`. Assuming +1 made a real B3S look silent. Timeout errors
+now list what the printer *did* send, so read the error text before guessing.
+
+The hardware in use is a **NIIMBOT B3S_P** (USB VID 0x3513 / PID 2,
+`/dev/cu.usbmodem*`; its Bluetooth side is `/dev/cu.B3S_P-*`). Nothing past the
+first handshake command has run on it yet; if the next failure is at
+`PRINT_START` or `SET_PAGE_SIZE`, the B3S likely wants the newer longer payloads
+(7-byte print start, 6-byte page size with copies).
 
 ## Testing without hardware
 
@@ -73,8 +78,8 @@ Verified:
   (639×400 badge → 384×613 dot strip for a 384-dot head).
 
 Not verified:
-- **NIIMBOT against a real printer** — none was plugged in. See the warning in
-  the Printing section above.
+- **A full NIIMBOT print.** A B3S failed at the first command (reply-id bug,
+  now fixed and tested against a simulated printer); not yet re-tried.
 - Live check-in against the edge function (no PIN was entered during the build),
   so `lookup`/`search`/`checkin`/`update` have only been exercised as types.
 
