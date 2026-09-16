@@ -78,4 +78,4 @@ Not verified:
 - Live check-in against the edge function (no PIN was entered during the build),
   so `lookup`/`search`/`checkin`/`update` have only been exercised as types.
 
-No git remote yet — the repo is local-only.
+Remote: https://github.com/damianmartone/hatch-badge-web (private).
